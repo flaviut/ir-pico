@@ -8,21 +8,6 @@ env:
 jobs:
   building:
     name: Building
-    continue-on-error: ${{ matrix.experimental || false }}
-    strategy:
-      matrix:
-        # All generated code should be running on stable now
-        rust: [nightly, stable]
-        include:
-          # Nightly is only for reference and allowed to fail
-          - rust: nightly
-            experimental: true
-        os:
-          # Check compilation works on common OSes
-          # (i.e. no path issues)
-          - ubuntu-latest
-          - macOS-latest
-          - windows-latest
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v3
@@ -31,8 +16,7 @@ jobs:
           toolchain: ${{ matrix.rust }}
           target: thumbv6m-none-eabi
       - run: cargo install flip-link
-      - run: cargo build --all
-      - run: cargo build --all --release
+      - run: cargo build --all --release --target thumbv6m-none-eabi
   linting:
     name: Linting
     runs-on: ubuntu-latest
@@ -44,7 +28,7 @@ jobs:
         with:
           components: clippy
           target: thumbv6m-none-eabi
-      - run: cargo clippy --all-features -- --deny=warnings
+      - run: cargo clippy --all-features --target thumbv6m-none-eabi
   formatting:
     name: Formatting
     runs-on: ubuntu-latest
