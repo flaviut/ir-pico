@@ -8,12 +8,11 @@ env:
 jobs:
   building:
     name: Building
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: ${{ matrix.rust }}
           target: thumbv6m-none-eabi
       - run: cargo install flip-link elf2uf2-rs
       - run: cargo build --all --release --target thumbv6m-none-eabi
