@@ -10,18 +10,27 @@ jobs:
     name: Building
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ matrix.rust }}
           target: thumbv6m-none-eabi
-      - run: cargo install flip-link
+      - run: cargo install flip-link elf2uf2-rs
       - run: cargo build --all --release --target thumbv6m-none-eabi
+      - run: elf2uf2-rs target/thumbv6m-none-eabi/release/ir-pico
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ir-pico-uf2
+          path: target/thumbv6m-none-eabi/release/ir-pico.uf2
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ir-pico-elf
+          path: target/thumbv6m-none-eabi/release/ir-pico
   linting:
     name: Linting
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
         with:
           submodules: true
       - uses: dtolnay/rust-toolchain@stable
@@ -33,7 +42,7 @@ jobs:
     name: Formatting
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
         with:
           submodules: true
       - uses: dtolnay/rust-toolchain@stable

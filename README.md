@@ -133,7 +133,7 @@ Or, to build a '.uf2' file that can be flashed without a debugger:
 
 ```
 cargo build --target thumbv6m-none-eabi --release
-elf2uf2-rs target/thumbv6m-none-eabi/release/rp2040-irtoy
+elf2uf2-rs target/thumbv6m-none-eabi/release/ir-pico
 ```
 
 ### Tests
