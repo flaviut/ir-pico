@@ -1,12 +1,22 @@
-An implementation of the IRToy protocol for the Raspberry Pi Pico.
+# ir-pico
 
-This is a quick way to get started with an infrared transceiver on Linux.
+This is an easy way to get started with an infrared transceiver on Linux.
+
+It's used to receive and send infrared codes, for example, to control a TV or a light.
+
 It is fully supported by the built-in Linux drivers (RC drivers from the media subsystem), and is
 compatible with LIRC.
+
+Building the hardware requires soldering skills, and a few components.
 
 ## Hardware
 
 ### BOM
+
+The exact part numbers are not critical.
+The description will help you choose the right parts if you can't access the listed parts.
+For example, I have no idea exactly which receiver and LED I actually used,
+since they were both unlabeled scrap parts.
 
 | Part                                                               | Description                                                                         |
 |--------------------------------------------------------------------|-------------------------------------------------------------------------------------|
