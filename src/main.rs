@@ -488,7 +488,10 @@ fn run_transmit_mode(
     'outer: loop {
         let bytes_read = poll_usb(serial, usb_dev, usb_rx_buf);
         if bytes_read > bytes_expected {
-            panic!("Got more bytes ({}) than expected ({}) ", bytes_read, bytes_expected);
+            panic!(
+                "Got more bytes ({}) than expected ({}) ",
+                bytes_read, bytes_expected
+            );
         }
         bytes_expected -= bytes_read;
 
