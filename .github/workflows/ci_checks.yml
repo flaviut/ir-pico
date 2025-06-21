@@ -51,8 +51,8 @@ jobs:
           components: rustfmt
           target: thumbv6m-none-eabi
       - run: cargo fmt -- --check
-  python-formatting:
-    name: Python Formatting
+  python-tests:
+    name: Python Tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -68,4 +68,7 @@ jobs:
         working-directory: py/
       - name: Run ruff format check
         run: uv run ruff format --check .
+        working-directory: py/
+      - name: Run tests
+        run: uv run pytest tests/
         working-directory: py/
