@@ -143,6 +143,23 @@ cd mylib
 cargo test
 ```
 
+### Python Development
+
+The `py/` directory contains a Python module for interacting with the IR Toy. To set up the development environment:
+
+```bash
+cd py/
+# Install uv if not already installed
+pip install uv
+
+# Create virtual environment and install dependencies
+uv sync --extra dev
+
+# Run code formatting and linting
+uv run ruff format .
+uv run ruff check .
+```
+
 ## Documentation
 
 - [IR Toy protocol documentation](http://dangerousprototypes.com/docs/USB_IR_Toy:_Sampling_mode)

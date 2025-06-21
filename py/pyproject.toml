@@ -1,0 +1,17 @@
+[project]
+name = "pyirtoy"
+dynamic = ["version"]
+description = "Python module for transmitting and receiving infrared signals from an IR Toy (firmware rev. 22 or higher)"
+license = {text = "Creative Commons Attribution ShareAlike license v3.0"}
+authors = [{name = "Chris LeBlanc", email = "crleblanc@gmail.com"}]
+classifiers = [
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Topic :: Software Development"
+]
+
+[project.optional-dependencies]
+dev = ["ruff"]
+
+[tool.ruff]
+# Use default settings for most options
