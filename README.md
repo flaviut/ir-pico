@@ -4,8 +4,7 @@ This is an easy way to get started with an infrared transceiver on Linux.
 
 It's used to receive and send infrared codes, for example, to control a TV or a light.
 
-It is fully supported by the built-in Linux drivers (RC drivers from the media subsystem), and is
-compatible with LIRC.
+It is fully supported by the built-in Linux drivers, where enabled (`CONFIG_IR_TOY=y`, which is the case for Arch Linux but not Debian), and in cases where the drivers are not supported, the code in the `py/` subdirectory can be used instead.
 
 Building the hardware requires soldering skills, and a few components.
 
