@@ -172,7 +172,7 @@ class IrToy(object):
 
 
 if __name__ == "__main__":
-    import serial, sys
+    import serial
 
     with serial.Serial(
         "/dev/serial/by-id/usb-flaviutamas.com_p_ir-pico_RP2040_Infrared_remote_transceiver__IR_Toy__0000001-if00",
