@@ -69,7 +69,13 @@ class TestIrToy(unittest.TestCase):
         # the transmit byte count report (b't' + 2-byte count = 4 bytes), completion code, and
         # protocol version for the final _set_sampling_mode call.
         self.serialMock.setReadCode(
-            [bytearray([62]), bytearray([62]), bytearray([ord('t'), 0, 4]), b"C", b"S01"]
+            [
+                bytearray([62]),
+                bytearray([62]),
+                bytearray([ord("t"), 0, 4]),
+                b"C",
+                b"S01",
+            ]
         )
 
         self.toy.transmit([10, 10])

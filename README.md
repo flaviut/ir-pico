@@ -90,13 +90,15 @@ input: Infrared Toy as /devices/pci0000:00/0000:00:08.1/0000:0e:00.3/usb3/3-4/3-
 
 ## Building
 
-### Install dependencies
+The build system uses [Nix](https://nixos.org/). All dependencies (Rust toolchain, `flip-link`, `elf2uf2-rs`, `probe-rs`) are provided by the Nix dev shell.
+
+### Enter the dev shell
 
 ```
-rustup target install thumbv6m-none-eabi
-cargo install flip-link
-cargo install --locked probe-rs-tools elf2uf2-rs
+nix develop
 ```
+
+Or, if you use [direnv](https://direnv.net/), run `direnv allow` once and the shell is loaded automatically.
 
 ### Build and flash
 
@@ -128,18 +130,26 @@ Erasing ✔ 100% [####################]  40.00 KiB @  64.50 KiB/s (took 1s)
 0.625610 [INFO ] main.rs:185  TX: [53, 30, 31]
 ```
 
-Or, to build a '.uf2' file that can be flashed without a debugger:
+Or, to build a `.uf2` file that can be flashed without a debugger:
 
 ```
-cargo build --target thumbv6m-none-eabi --release
-elf2uf2-rs target/thumbv6m-none-eabi/release/ir-pico
+nix build
 ```
 
-### Tests
+The UF2 file is output to `result/bin/ir-pico.uf2`.
+
+### Tests and checks
+
+Run all checks (Rust build + clippy, Python tests, formatting):
 
 ```
-cd mylib
-cargo test
+nix flake check
+```
+
+To auto-format all files:
+
+```
+nix fmt
 ```
 
 ### Python Development

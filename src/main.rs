@@ -4,7 +4,6 @@
 mod util;
 
 use core::mem::MaybeUninit;
-use core::sync::atomic::{AtomicUsize, Ordering};
 use rp_pico as bsp;
 
 use bsp::entry;
@@ -13,7 +12,7 @@ use defmt_rtt as _;
 use panic_probe as _;
 
 use bsp::hal::{
-    clocks::{init_clocks_and_plls, Clock},
+    clocks::{Clock, init_clocks_and_plls},
     gpio::{FunctionSio, Pin, PullDown, SioInput, SioOutput},
     pac,
     sio::Sio,
@@ -28,8 +27,8 @@ use embedded_hal::digital::{InputPin, OutputPin};
 
 use fugit::{HertzU32, MicrosDurationU64};
 use heapless::spsc::Queue;
-use heapless::{spsc, Deque};
-use mylib::{calculate_ir_params, Command};
+use heapless::{Deque, spsc};
+use mylib::{Command, calculate_ir_params};
 use rp_pico::hal;
 use rp_pico::hal::gpio::PullUp;
 use rp_pico::hal::multicore::{Multicore, Stack};
@@ -147,8 +146,8 @@ fn poll_usb(
         match serial.read(&mut temp_buf) {
             Ok(bytes_read) => {
                 info!("RX: {:02x}", &temp_buf[..bytes_read]);
-                for i in 0..bytes_read {
-                    usb_rx_buf.push_back(temp_buf[i]).unwrap();
+                for byte in &temp_buf[..bytes_read] {
+                    usb_rx_buf.push_back(*byte).unwrap();
                 }
                 total_read += bytes_read;
                 break;
@@ -173,7 +172,7 @@ fn serial_write_buffer(
     while sent < data.len() {
         match serial.write(&data[sent..]) {
             Ok(len) => {
-                info!("TX: {:02x}", data[sent..sent+len]);
+                info!("TX: {:02x}", data[sent..sent + len]);
                 sent += len;
             }
             Err(UsbError::WouldBlock) => { /* continue */ }
@@ -206,12 +205,11 @@ fn main() -> ! {
         &mut pac.RESETS,
         &mut watchdog,
     )
-    .ok()
     .expect("Clocks failed to initialize");
 
     let mut timer = Timer::new(pac.TIMER, &mut pac.RESETS, &clocks);
     static mut TIMER_PTR: Option<Timer> = None;
-    unsafe { TIMER_PTR = Some(timer.clone()) };
+    unsafe { TIMER_PTR = Some(timer) };
 
     defmt::timestamp!("{=u64:us}", {
         unsafe { TIMER_PTR.unwrap().get_counter().ticks() }
@@ -240,7 +238,7 @@ fn main() -> ! {
             true, // Force VBUS detection
             &mut pac.RESETS,
         )));
-        USB_BUS.as_ref().unwrap()
+        (*core::ptr::addr_of!(USB_BUS)).as_ref().unwrap()
     };
     let mut serial = SerialPort::new(usb_bus);
     let mut usb_dev = UsbDeviceBuilder::new(usb_bus, UsbVidPid(0x04d8, 0xfd08))
@@ -255,8 +253,8 @@ fn main() -> ! {
 
     static mut COMMAND_QUEUE_BUFFER: MaybeUninit<TransmitQueue> = MaybeUninit::uninit();
     let command_queue = unsafe {
-        COMMAND_QUEUE_BUFFER.write(Queue::new());
-        &mut *COMMAND_QUEUE_BUFFER.as_mut_ptr()
+        (*core::ptr::addr_of_mut!(COMMAND_QUEUE_BUFFER)).write(Queue::new());
+        &mut *(*core::ptr::addr_of_mut!(COMMAND_QUEUE_BUFFER)).as_mut_ptr()
     };
     let (mut command_producer, command_consumer) = command_queue.split();
 
@@ -266,9 +264,10 @@ fn main() -> ! {
     let cores = mc.cores();
     let core1 = &mut cores[1];
     core1
-        .spawn(unsafe { &mut CORE1_STACK.mem }, move || {
-            core1_task(ir_tx_pin, clocks.system_clock.freq(), command_consumer)
-        })
+        .spawn(
+            unsafe { &mut (*core::ptr::addr_of_mut!(CORE1_STACK)).mem },
+            move || core1_task(ir_tx_pin, clocks.system_clock.freq(), command_consumer),
+        )
         .unwrap();
 
     let mut device_state = DeviceState::Idle;
@@ -281,7 +280,7 @@ fn main() -> ! {
         poll_usb(&mut serial, &mut usb_dev, &mut usb_rx_buf);
 
         while !usb_rx_buf.is_empty() {
-            let cmd = match usb_rx_buf.pop_front().map(|b| Command::parse(b)).flatten() {
+            let cmd = match usb_rx_buf.pop_front().and_then(Command::parse) {
                 Some(cmd) => cmd,
                 None => {
                     // If we get here, we've received a byte that isn't a valid command.
@@ -357,9 +356,10 @@ fn main() -> ! {
                         && flags.tx_byte_count_enabled
                         && flags.tx_notify_enabled)
                     {
-                        error!("We require all three flags to be enabled; ignoring EnterTransmitMode");
+                        error!(
+                            "We require all three flags to be enabled; ignoring EnterTransmitMode"
+                        );
                     } else {
-                        device_state = DeviceState::Transmit;
                         if !usb_rx_buf.is_empty() {
                             // we only support handshake mode, during which we expect no data
                             // in the USB buffer until we send the handshake response
@@ -458,7 +458,7 @@ fn run_transmit_mode(
     usb_rx_buf: &mut Deque<u8, 255>,
     producer: &mut spsc::Producer<'static, TransmitCommand, 1024>,
     timer: &mut Timer,
-) -> () {
+) {
     led_pin.set_high().unwrap();
 
     let mut bytes_transmitted: u32 = 0;
@@ -534,7 +534,7 @@ fn run_transmit_mode(
     serial_write_buffer(
         serial,
         &[
-            't' as u8,
+            b't',
             (bytes_transmitted >> 8) as u8,
             bytes_transmitted as u8,
         ],
@@ -542,7 +542,7 @@ fn run_transmit_mode(
     .unwrap();
     // always success. might be possible to fail but in practice I expect this device is so much
     // faster than the original implementation that buffer underruns are not likely
-    serial_write_buffer(serial, &['C' as u8]).unwrap();
+    serial_write_buffer(serial, b"C").unwrap();
 
     led_pin.set_low().unwrap();
 }

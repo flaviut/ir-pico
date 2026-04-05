@@ -1,74 +1,13 @@
-name: CI Checks
+name: CI
 
 on: [push, pull_request]
 
-env:
-  CARGO_TERM_COLOR: always
-
 jobs:
-  building:
-    name: Building
-    runs-on: ubuntu-latest
-    steps:
-      - name: Install xmllint
-        run: sudo apt-get update && sudo apt-get install -y libudev-dev
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          target: thumbv6m-none-eabi
-      - run: cargo install flip-link elf2uf2-rs
-      - run: cargo build --all --release --target thumbv6m-none-eabi
-      - run: elf2uf2-rs target/thumbv6m-none-eabi/release/ir-pico
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ir-pico-uf2
-          path: target/thumbv6m-none-eabi/release/ir-pico.uf2
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ir-pico-elf
-          path: target/thumbv6m-none-eabi/release/ir-pico
-  linting:
-    name: Linting
+  build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: true
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-          target: thumbv6m-none-eabi
-      - run: cargo clippy --all-features --target thumbv6m-none-eabi
-  formatting:
-    name: Formatting
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: true
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt
-          target: thumbv6m-none-eabi
-      - run: cargo fmt -- --check
-  python-tests:
-    name: Python Tests
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install uv
-        uses: astral-sh/setup-uv@v4
-      - name: Set up Python
-        run: uv python install
-      - name: Install dependencies
-        run: uv sync --extra dev
-        working-directory: py/
-      - name: Run ruff check
-        run: uv run ruff check .
-        working-directory: py/
-      - name: Run ruff format check
-        run: uv run ruff format --check .
-        working-directory: py/
-      - name: Run tests
-        run: uv run pytest tests/
-        working-directory: py/
+      - uses: DeterminateSystems/nix-installer-action@main
+      - name: Install omnix
+        run: nix profile install nixpkgs#omnix
+      - run: om ci
