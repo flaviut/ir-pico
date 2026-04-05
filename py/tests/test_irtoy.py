@@ -65,31 +65,24 @@ class TestIrToy(unittest.TestCase):
         # length of code sent must be even
         self.assertRaises(ValueError, self.toy.transmit, [10])
 
-        # set the expected results from read(): protocol version, handshake ('>' converts to 62),
-        # byte count transmitted, and completion code.
+        # set the expected results from read(): two handshakes (62 bytes available each time),
+        # the transmit byte count report (b't' + 2-byte count = 4 bytes), completion code, and
+        # protocol version for the final _set_sampling_mode call.
         self.serialMock.setReadCode(
-            [bytearray([62]), bytearray([62]), bytearray([0, 0, 0, 1]), b"C", b"S01"]
+            [bytearray([62]), bytearray([62]), bytearray([ord('t'), 0, 4]), b"C", b"S01"]
         )
 
         self.toy.transmit([10, 10])
 
-        # when transmitting, we expect a reset (five 0x00), 'S' to enter sampling mode, 0x26 for enable handshake,
-        # 0x25 to enable notify on transmit, 0x24 to enable transmit byte count, and 0x03 to start the transmission,
-        # then the list of codes to transmit (always ending with 0xff, 0xff), and another reset.  See DP link at top of this file for more info.
+        # setUp writes: b"v" (firmware_revision), b"\0\0\0\0\0S" (_set_sampling_mode).
+        # transmit writes: b"\x26\x25\x24\x03" (enable handshake/bytecount/notify + start TX),
+        # the IR code list (always ending with 0xff, 0xff), then b"\0\0\0\0\0S" to return to sampling mode.
         expectedHistory = [
-            [0x00, 0x00, 0x00, 0x00, 0x00],
-            "v",
-            [0x00, 0x00, 0x00, 0x00, 0x00],
-            "v",
-            [0x00, 0x00, 0x00, 0x00, 0x00],
-            b"S",
-            [0x26],
-            [0x25],
-            [0x24],
-            [0x03],
+            b"v",
+            b"\0\0\0\0\0S",
+            b"\x26\x25\x24\x03",
             [10, 10, 0xFF, 0xFF],
-            [0x00, 0x00, 0x00, 0x00, 0x00],
-            b"S",
+            b"\0\0\0\0\0S",
         ]
 
         self.assertEqual(self.serialMock.writeHistory, expectedHistory)

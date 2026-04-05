@@ -68,8 +68,8 @@ class IrToy(object):
         self.toy.write(b"v")
 
         version_string = self.toy.read(4)
-        hardware_version = int(version_string[1:2])
-        firmware_version = int(version_string[2:4])
+        hardware_version = version_string[1]
+        firmware_version = int(version_string[2:4].decode())
 
         return hardware_version, firmware_version
 

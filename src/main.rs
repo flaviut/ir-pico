@@ -58,26 +58,17 @@ enum DeviceState {
     Transmit, // Transmitting IR
 }
 
+#[derive(Default)]
 struct IrToyFlags {
     tx_handshake_enabled: bool,
     tx_byte_count_enabled: bool,
     tx_notify_enabled: bool,
 }
 
-impl Default for IrToyFlags {
-    fn default() -> Self {
-        IrToyFlags {
-            tx_handshake_enabled: false,
-            tx_byte_count_enabled: false,
-            tx_notify_enabled: false,
-        }
-    }
-}
-
 // Helper to convert microseconds duration to IRToy 16-bit count
 fn us_to_irtoy_count(us: MicrosDurationU64) -> u16 {
-    // Using integer math to avoid float math: count = us * 10000 / 213333
-    let count = (us.to_micros() * 10000) / 213333;
+    // 1 count = 21µs (matches the Linux kernel ir_toy driver UNIT_US = 21)
+    let count = us.to_micros() / 21;
     if count > u16::MAX as u64 {
         u16::MAX
     } else {
@@ -86,15 +77,15 @@ fn us_to_irtoy_count(us: MicrosDurationU64) -> u16 {
 }
 
 // Helper to convert IRToy 16-bit count to microseconds duration
-fn irtoy_count_to_us(count: u16) -> u16 {
-    // us = count * 21.3333 = count * 213333 / 10000
-    ((count as u64) * 213333 / 10000) as u16
+fn irtoy_count_to_us(count: u16) -> u32 {
+    // 1 count = 21µs (matches the Linux kernel ir_toy driver UNIT_US = 21)
+    (count as u32) * 21
 }
 
 #[derive(Debug)]
 enum TransmitCommand {
-    On(u16),
-    Off(u16),
+    On(u32),
+    Off(u32),
     SetDutyTimings(u8, u8),
 }
 
@@ -126,7 +117,7 @@ fn core1_task(
                 (up_time, down_time) = (up as u32, down as u32);
             }
             TransmitCommand::On(duration_us) => {
-                let cycles = (duration_us as u32) / (up_time + down_time);
+                let cycles = duration_us / (up_time + down_time);
                 for _ in 0..cycles {
                     ir_tx_pin.set_high().ok();
                     delay.delay_us(up_time);
@@ -136,7 +127,7 @@ fn core1_task(
             }
             TransmitCommand::Off(duration_us) => {
                 ir_tx_pin.set_low().ok();
-                delay.delay_us(duration_us as u32);
+                delay.delay_us(duration_us);
             }
         }
     }
@@ -182,7 +173,7 @@ fn serial_write_buffer(
     while sent < data.len() {
         match serial.write(&data[sent..]) {
             Ok(len) => {
-                info!("TX: {:02x}", data[sent..len]);
+                info!("TX: {:02x}", data[sent..sent+len]);
                 sent += len;
             }
             Err(UsbError::WouldBlock) => { /* continue */ }
@@ -362,29 +353,30 @@ fn main() -> ! {
                 }
                 Command::EnterTransmitMode => {
                     // the transmit mode will take over the main loop while it is active
-                    device_state = DeviceState::Transmit;
                     if !(flags.tx_handshake_enabled
                         && flags.tx_byte_count_enabled
                         && flags.tx_notify_enabled)
                     {
-                        error!("We require all three flags to be enabled");
-                    }
-                    if usb_rx_buf.len() > 0 {
-                        // we only support handshake mode, during which we expect no data
-                        // in the USB buffer until we send the handshake response
-                        error!("Unexpected data in USB buffer");
-                    }
+                        error!("We require all three flags to be enabled; ignoring EnterTransmitMode");
+                    } else {
+                        device_state = DeviceState::Transmit;
+                        if !usb_rx_buf.is_empty() {
+                            // we only support handshake mode, during which we expect no data
+                            // in the USB buffer until we send the handshake response
+                            error!("Unexpected data in USB buffer");
+                        }
 
-                    run_transmit_mode(
-                        &mut serial,
-                        &mut usb_dev,
-                        &mut led_pin,
-                        &mut usb_rx_buf,
-                        &mut command_producer,
-                        &mut timer,
-                    );
-                    info!("Finished transmit mode");
-                    device_state = DeviceState::Idle;
+                        run_transmit_mode(
+                            &mut serial,
+                            &mut usb_dev,
+                            &mut led_pin,
+                            &mut usb_rx_buf,
+                            &mut command_producer,
+                            &mut timer,
+                        );
+                        info!("Finished transmit mode");
+                        device_state = DeviceState::Idle;
+                    }
                 }
 
                 unsupported => {
