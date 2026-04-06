@@ -347,7 +347,6 @@ fn main() -> ! {
                     device_state = DeviceState::IrSample;
                     ir_sample_state = IrSampleState::default();
                     led_pin.set_high().ok(); // LED on during IrSample mode
-                    timer.delay_ms(1);
                     serial_write_buffer(&mut serial, IR_SAMPLE_MODE_RESPONSE).unwrap();
                 }
                 Command::EnterTransmitMode => {
@@ -525,10 +524,6 @@ fn run_transmit_mode(
             serial_write_buffer(serial, &[bytes_expected as u8]).unwrap();
         }
     }
-
-    // spec requires a final handshake even though we expect no data
-    bytes_expected = get_remaining_bytes(producer);
-    serial_write_buffer(serial, &[bytes_expected as u8]).unwrap();
 
     // number of bytes transmitted in the format t|high-8bits|low-8bits
     serial_write_buffer(
