@@ -278,6 +278,7 @@ dependencies = [
  "heapless",
  "mylib",
  "panic-probe",
+ "pio",
  "rp-pico",
  "usb-device",
  "usbd-serial",

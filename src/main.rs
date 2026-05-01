@@ -3,7 +3,6 @@
 
 mod util;
 
-use core::mem::MaybeUninit;
 use rp_pico as bsp;
 
 use bsp::entry;
@@ -12,26 +11,21 @@ use defmt_rtt as _;
 use panic_probe as _;
 
 use bsp::hal::{
-    clocks::{Clock, init_clocks_and_plls},
-    gpio::{FunctionSio, Pin, PullDown, SioInput, SioOutput},
+    clocks::init_clocks_and_plls,
+    gpio::{FunctionPio0, FunctionSio, Pin, PullDown, PullUp, SioInput},
     pac,
+    pio::{PIOBuilder, PIOExt, PinDir, PIO0SM0, Tx},
     sio::Sio,
     timer::Timer,
     usb::UsbBus,
     watchdog::Watchdog,
 };
 
-use cortex_m::delay::Delay;
-use embedded_hal::delay::DelayNs;
 use embedded_hal::digital::{InputPin, OutputPin};
-
-use fugit::{HertzU32, MicrosDurationU64};
-use heapless::spsc::Queue;
-use heapless::{Deque, spsc};
+use fugit::MicrosDurationU64;
+use heapless::Deque;
 use mylib::{Command, calculate_ir_params};
 use rp_pico::hal;
-use rp_pico::hal::gpio::PullUp;
-use rp_pico::hal::multicore::{Multicore, Stack};
 use usb_device::{class_prelude::*, prelude::*};
 use usbd_serial::SerialPort;
 
@@ -44,16 +38,20 @@ const FIRMWARE_VERSION_H: u8 = b'2';
 const FIRMWARE_VERSION_L: u8 = b'1';
 const IR_SAMPLE_MODE_RESPONSE: &[u8] = b"S01";
 
+// PIO clock = 125MHz / 125 = 1MHz.
+// Carrier loop: jmp!x(1) + set[12](13) + set[11](12) + jmpx--(1) = 27 cycles = 27µs ≈ 37kHz
+const PIO_CARRIER_CYCLE_US: u32 = 27;
+
 type IrRxPin = Pin<hal::gpio::bank0::Gpio21, FunctionSio<SioInput>, PullUp>;
-type IrTxPin = Pin<hal::gpio::bank0::Gpio10, FunctionSio<SioOutput>, PullDown>;
 /// Onboard LED
-type LedPin = Pin<hal::gpio::bank0::Gpio25, FunctionSio<SioOutput>, PullDown>;
+type LedPin = Pin<hal::gpio::bank0::Gpio25, FunctionSio<hal::gpio::SioOutput>, PullDown>;
 
 // --- State ---
 #[derive(PartialEq, Eq, Clone, Copy, defmt::Format)]
 enum DeviceState {
     Idle,
     IrSample, // Receiving IR
+    #[allow(dead_code)]
     Transmit, // Transmitting IR
 }
 
@@ -66,7 +64,6 @@ struct IrToyFlags {
 
 // Helper to convert microseconds duration to IRToy 16-bit count
 fn us_to_irtoy_count(us: MicrosDurationU64) -> u16 {
-    // 1 count = 21µs (matches the Linux kernel ir_toy driver UNIT_US = 21)
     let count = us.to_micros() / 21;
     if count > u16::MAX as u64 {
         u16::MAX
@@ -77,59 +74,46 @@ fn us_to_irtoy_count(us: MicrosDurationU64) -> u16 {
 
 // Helper to convert IRToy 16-bit count to microseconds duration
 fn irtoy_count_to_us(count: u16) -> u32 {
-    // 1 count = 21µs (matches the Linux kernel ir_toy driver UNIT_US = 21)
     (count as u32) * 21
 }
 
-#[derive(Debug)]
-enum TransmitCommand {
-    On(u32),
-    Off(u32),
-    SetDutyTimings(u8, u8),
-}
+/// Build the PIO program for IR TX carrier generation.
+///
+/// Protocol: pairs of u32 words written to TX FIFO:
+///   word[0]: on_carrier_cycles  (number of ~37kHz carrier cycles; 0 = skip carrier)
+///   word[1]: off_us - 1         (space duration minus 1 in µs; loops off_us times)
+///
+/// PIO clock: 125MHz / 125 = 1MHz (1µs per tick)
+/// Carrier: 13µs high + 12µs low + 1µs jmp = 26µs; +1µs for loop-check jmp ≈ 37kHz
+fn ir_tx_pio_program() -> pio::Program<32> {
+    use pio::{Assembler, JmpCondition, OutDestination, SetDestination};
+    let mut a = Assembler::<32>::new();
 
-type TransmitQueue = Queue<TransmitCommand, 1024>;
+    let mut wrap_target = a.label();
+    let mut wrap_source = a.label();
+    let mut do_off = a.label();
+    let mut on_loop = a.label();
 
-fn core1_task(
-    mut ir_tx_pin: IrTxPin,
-    sys_freq: HertzU32,
-    mut command_queue: spsc::Consumer<TransmitCommand, 1024>,
-) {
-    let core = unsafe { pac::CorePeripherals::steal() };
-    let mut delay = Delay::new(core.SYST, sys_freq.to_Hz());
+    // --- On phase: generate carrier for on_carrier_cycles cycles ---
+    a.bind(&mut wrap_target);
+    a.pull(false, true); // blocking pull → OSR = on_carrier_cycles
+    a.out(OutDestination::X, 32); // X = on_carrier_cycles
 
-    let (mut up_time, mut down_time) = {
-        let (up_time, down_time) = mylib::calculate_timings_us(38e3, 0.5);
-        (up_time as u32, down_time as u32)
-    };
+    a.bind(&mut on_loop);
+    a.jmp(JmpCondition::XIsZero, &mut do_off); // if X==0, skip carrier
+    a.set_with_delay(SetDestination::PINS, 1, 12); // 13 cycles high
+    a.set_with_delay(SetDestination::PINS, 0, 11); // 12 cycles low
+    a.jmp(JmpCondition::XDecNonZero, &mut on_loop); // 1 cycle; X--, loop if nonzero
 
-    loop {
-        let command = loop {
-            match command_queue.dequeue() {
-                Some(command) => break command,
-                None => { /* busy wait */ }
-            }
-        };
+    // --- Off phase: hold pin low for (off_us) µs ---
+    a.bind(&mut do_off);
+    a.pull(false, true); // blocking pull → OSR = off_us - 1
+    a.out(OutDestination::X, 32); // X = off_us - 1
 
-        match command {
-            TransmitCommand::SetDutyTimings(up, down) => {
-                (up_time, down_time) = (up as u32, down as u32);
-            }
-            TransmitCommand::On(duration_us) => {
-                let cycles = duration_us / (up_time + down_time);
-                for _ in 0..cycles {
-                    ir_tx_pin.set_high().ok();
-                    delay.delay_us(up_time);
-                    ir_tx_pin.set_low().ok();
-                    delay.delay_us(down_time);
-                }
-            }
-            TransmitCommand::Off(duration_us) => {
-                ir_tx_pin.set_low().ok();
-                delay.delay_us(duration_us);
-            }
-        }
-    }
+    a.bind(&mut wrap_source);
+    a.jmp(JmpCondition::XDecNonZero, &mut wrap_source); // 1µs per iteration; wraps when X==0
+
+    a.assemble_with_wrap(wrap_source, wrap_target)
 }
 
 fn poll_usb(
@@ -190,11 +174,24 @@ fn serial_write_buffer(
     Ok(())
 }
 
+/// Write a u32 to the PIO TX FIFO, polling USB while waiting for space.
+fn pio_tx_write(
+    ir_tx: &mut Tx<PIO0SM0>,
+    serial: &mut SerialPort<'static, UsbBus>,
+    usb_dev: &mut UsbDevice<'static, UsbBus>,
+    usb_rx_buf: &mut Deque<u8, 255>,
+    value: u32,
+) {
+    while !ir_tx.write(value) {
+        poll_usb(serial, usb_dev, usb_rx_buf);
+    }
+}
+
 #[entry]
 fn main() -> ! {
     let mut pac = pac::Peripherals::take().unwrap();
     let mut watchdog = Watchdog::new(pac.WATCHDOG);
-    let mut sio = Sio::new(pac.SIO);
+    let sio = Sio::new(pac.SIO);
 
     let clocks = init_clocks_and_plls(
         XOSC_CRYSTAL_FREQ,
@@ -225,8 +222,21 @@ fn main() -> ! {
     let mut led_pin: LedPin = pins.led.into_push_pull_output(); // GP25
     let mut ir_rx_pin: IrRxPin = pins.gpio21.into_pull_up_input();
     led_pin.set_low().ok();
-    let mut ir_tx_pin: IrTxPin = pins.gpio10.into_push_pull_output();
-    ir_tx_pin.set_low().ok(); // Ensure the transmitter is off initially
+
+    // Configure GPIO10 as PIO0 output for IR TX
+    let ir_tx_pin: Pin<_, FunctionPio0, _> = pins.gpio10.into_function();
+    let ir_tx_pin_id = ir_tx_pin.id().num;
+
+    // --- PIO Setup for IR TX ---
+    let (mut pio, sm0, _, _, _) = pac.PIO0.split(&mut pac.RESETS);
+    let program = ir_tx_pio_program();
+    let installed = pio.install(&program).unwrap();
+    let (mut sm, _rx, mut ir_tx) = PIOBuilder::from_installed_program(installed)
+        .set_pins(ir_tx_pin_id, 1)
+        .clock_divisor_fixed_point(125, 0) // 125MHz / 125 = 1MHz
+        .build(sm0);
+    sm.set_pindirs([(ir_tx_pin_id, PinDir::Output)]);
+    sm.start();
 
     // --- USB Setup ---
     static mut USB_BUS: Option<UsbBusAllocator<UsbBus>> = None;
@@ -251,25 +261,6 @@ fn main() -> ! {
         .build();
     info!("USB device configured");
 
-    static mut COMMAND_QUEUE_BUFFER: MaybeUninit<TransmitQueue> = MaybeUninit::uninit();
-    let command_queue = unsafe {
-        (*core::ptr::addr_of_mut!(COMMAND_QUEUE_BUFFER)).write(Queue::new());
-        &mut *(*core::ptr::addr_of_mut!(COMMAND_QUEUE_BUFFER)).as_mut_ptr()
-    };
-    let (mut command_producer, command_consumer) = command_queue.split();
-
-    static mut CORE1_STACK: Stack<4096> = Stack::new();
-    // Other init code above this line
-    let mut mc = Multicore::new(&mut pac.PSM, &mut pac.PPB, &mut sio.fifo);
-    let cores = mc.cores();
-    let core1 = &mut cores[1];
-    core1
-        .spawn(
-            unsafe { &mut (*core::ptr::addr_of_mut!(CORE1_STACK)).mem },
-            move || core1_task(ir_tx_pin, clocks.system_clock.freq(), command_consumer),
-        )
-        .unwrap();
-
     let mut device_state = DeviceState::Idle;
     let mut flags = IrToyFlags::default();
 
@@ -283,10 +274,6 @@ fn main() -> ! {
             let cmd = match usb_rx_buf.pop_front().and_then(Command::parse) {
                 Some(cmd) => cmd,
                 None => {
-                    // If we get here, we've received a byte that isn't a valid command.
-                    // This may be a mismatch between the state of the host and the device.
-                    // However, we can't do anything about it except ignore it and hope that the
-                    // host realizes it needs to reset us.
                     info!("Ignoring invalid command byte");
                     continue;
                 }
@@ -294,13 +281,9 @@ fn main() -> ! {
             info!("CMD: {:?}", defmt::Debug2Format(&cmd));
 
             match cmd {
-                Command::Terminator => {
-                    // This is the terminator byte for when we're in transmit mode, and we may
-                    // receive it at any time as part of the reset process.
-                    // We don't need to do anything.
-                }
+                Command::Terminator => {}
                 Command::Reset => {
-                    led_pin.set_low().ok(); // LED off during reset
+                    led_pin.set_low().ok();
                     flags = IrToyFlags::default();
                     ir_sample_state = IrSampleState::default();
                     device_state = DeviceState::Idle;
@@ -327,30 +310,25 @@ fn main() -> ! {
                     flags.tx_notify_enabled = true;
                 }
                 Command::SetupTransmitModulation => {
+                    // Consume the two parameter bytes; PIO carrier is fixed at ~37kHz
                     let pr2_value = usb_rx_buf.pop_front().unwrap();
                     let duty_cycle_byte = usb_rx_buf.pop_front().unwrap();
                     let (frequency, duty_cycle_percent) =
                         calculate_ir_params(pr2_value, duty_cycle_byte);
                     info!(
-                        "Calculated frequency: {} Hz, Duty Cycle: {}%",
+                        "Modulation: {} Hz, {}% duty (PIO carrier fixed at ~37kHz)",
                         frequency as u32,
                         (duty_cycle_percent * 100.0) as u32
                     );
-                    let (up_time, down_time) =
-                        mylib::calculate_timings_us(frequency, duty_cycle_percent);
-                    command_producer
-                        .enqueue(TransmitCommand::SetDutyTimings(up_time, down_time))
-                        .unwrap();
                 }
 
                 Command::EnterIrSampleMode => {
                     device_state = DeviceState::IrSample;
                     ir_sample_state = IrSampleState::default();
-                    led_pin.set_high().ok(); // LED on during IrSample mode
+                    led_pin.set_high().ok();
                     serial_write_buffer(&mut serial, IR_SAMPLE_MODE_RESPONSE).unwrap();
                 }
                 Command::EnterTransmitMode => {
-                    // the transmit mode will take over the main loop while it is active
                     if !(flags.tx_handshake_enabled
                         && flags.tx_byte_count_enabled
                         && flags.tx_notify_enabled)
@@ -360,8 +338,6 @@ fn main() -> ! {
                         );
                     } else {
                         if !usb_rx_buf.is_empty() {
-                            // we only support handshake mode, during which we expect no data
-                            // in the USB buffer until we send the handshake response
                             error!("Unexpected data in USB buffer");
                         }
 
@@ -370,7 +346,7 @@ fn main() -> ! {
                             &mut usb_dev,
                             &mut led_pin,
                             &mut usb_rx_buf,
-                            &mut command_producer,
+                            &mut ir_tx,
                             &mut timer,
                         );
                         info!("Finished transmit mode");
@@ -387,8 +363,7 @@ fn main() -> ! {
             }
         }
 
-        if device_state == DeviceState::Transmit {
-        } else if device_state == DeviceState::IrSample {
+        if device_state == DeviceState::IrSample {
             ir_sample_state =
                 run_ir_sample_mode(&mut serial, &timer, &mut ir_rx_pin, ir_sample_state);
         }
@@ -415,19 +390,16 @@ fn run_ir_sample_mode(
     ir_rx_pin: &mut IrRxPin,
     ir_sample_state: IrSampleState,
 ) -> IrSampleState {
-    // is_low because the receiver pulls the pin low when it detects a pulse
     let current_pin_state = ir_rx_pin.is_low().unwrap();
     let now = timer.get_counter();
 
     if ir_sample_state.last_edge_time.ticks() == 0 {
         return if current_pin_state {
-            // first time we see a pulse
             IrSampleState {
                 last_edge_time: now,
                 last_pin_state: current_pin_state,
             }
         } else {
-            // we haven't seen a pulse yet
             IrSampleState::default()
         };
     }
@@ -437,7 +409,6 @@ fn run_ir_sample_mode(
     if current_pin_state != ir_sample_state.last_pin_state || ir_count == 0xFFFF {
         serial_write_buffer(serial, &ir_count.to_be_bytes()).unwrap();
         return if ir_count == 0xFFFF {
-            // timeout! resetting.
             IrSampleState::default()
         } else {
             IrSampleState {
@@ -455,32 +426,29 @@ fn run_transmit_mode(
     usb_dev: &mut UsbDevice<'static, UsbBus>,
     led_pin: &mut LedPin,
     usb_rx_buf: &mut Deque<u8, 255>,
-    producer: &mut spsc::Producer<'static, TransmitCommand, 1024>,
+    ir_tx: &mut Tx<PIO0SM0>,
     timer: &mut Timer,
 ) {
     led_pin.set_high().unwrap();
 
     let mut bytes_transmitted: u32 = 0;
 
-    fn get_remaining_bytes(producer: &spsc::Producer<'static, TransmitCommand, 1024>) -> usize {
-        // the original device only supports a max of 63 bytes, and some drivers (Linux...) will
-        // fail to understand that we have capacity for more than 63 bytes
-        62.min(producer.capacity() * 2)
-    }
+    // The original device only supports max 63 bytes per handshake
+    const BYTES_PER_HANDSHAKE: u8 = 62;
 
     info!("Sending initial handshake");
-    let mut bytes_expected = get_remaining_bytes(producer);
-    serial_write_buffer(serial, &[bytes_expected as u8]).unwrap();
+    serial_write_buffer(serial, &[BYTES_PER_HANDSHAKE]).unwrap();
     let _ = serial.flush();
 
+    let mut bytes_expected = BYTES_PER_HANDSHAKE as usize;
     let mut last_sent = timer.get_counter();
-
     let mut is_pulse = true;
+
     'outer: loop {
         let bytes_read = poll_usb(serial, usb_dev, usb_rx_buf);
         if bytes_read > bytes_expected {
             panic!(
-                "Got more bytes ({}) than expected ({}) ",
+                "Got more bytes ({}) than expected ({})",
                 bytes_read, bytes_expected
             );
         }
@@ -495,37 +463,40 @@ fn run_transmit_mode(
             let value = (usb_rx_buf.pop_front().unwrap() as u16) << 8
                 | (usb_rx_buf.pop_front().unwrap() as u16);
             bytes_transmitted += 2;
+
             if value == 0xFFFF {
-                // wait for the transmitter to fully drain the queue
-                while producer.len() > 0 {
-                    let bytes_read = poll_usb(serial, usb_dev, usb_rx_buf);
-                    if bytes_read > 0 {
-                        panic!("Got more bytes ({}) when transmit is complete", bytes_read);
-                    }
+                if !is_pulse {
+                    // We already pushed an "on"; push a 1µs dummy "off" to keep PIO state consistent
+                    pio_tx_write(ir_tx, serial, usb_dev, usb_rx_buf, 0);
+                }
+                // Wait for PIO FIFO to drain
+                while !ir_tx.is_empty() {
+                    poll_usb(serial, usb_dev, usb_rx_buf);
                 }
                 break 'outer;
             }
 
             let duration_us = irtoy_count_to_us(value);
-
             last_sent = timer.get_counter();
+
             if is_pulse {
-                producer.enqueue(TransmitCommand::On(duration_us)).unwrap();
+                let on_cycles = duration_us / PIO_CARRIER_CYCLE_US;
+                pio_tx_write(ir_tx, serial, usb_dev, usb_rx_buf, on_cycles);
             } else {
-                producer.enqueue(TransmitCommand::Off(duration_us)).unwrap();
+                let off_x = duration_us.saturating_sub(1);
+                pio_tx_write(ir_tx, serial, usb_dev, usb_rx_buf, off_x);
             }
             is_pulse = !is_pulse;
         }
 
         if bytes_expected == 0 {
-            info!("Finished sending everything! New handshake");
-            // finished sending everything! new handshake so we get more data
-            bytes_expected = get_remaining_bytes(producer);
-            serial_write_buffer(serial, &[bytes_expected as u8]).unwrap();
+            info!("Sending new handshake");
+            bytes_expected = BYTES_PER_HANDSHAKE as usize;
+            serial_write_buffer(serial, &[BYTES_PER_HANDSHAKE]).unwrap();
         }
     }
 
-    // number of bytes transmitted in the format t|high-8bits|low-8bits
+    // number of bytes transmitted: t|high|low
     serial_write_buffer(
         serial,
         &[
@@ -535,8 +506,6 @@ fn run_transmit_mode(
         ],
     )
     .unwrap();
-    // always success. might be possible to fail but in practice I expect this device is so much
-    // faster than the original implementation that buffer underruns are not likely
     serial_write_buffer(serial, b"C").unwrap();
 
     led_pin.set_low().unwrap();

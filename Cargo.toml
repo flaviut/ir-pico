@@ -22,6 +22,7 @@ usbd-serial = "0.2.2"
 usb-device = "0.3.2"
 
 mylib = { path = "mylib" }
+pio = "0.2.1"
 
 # cargo build/run
 [profile.dev]
