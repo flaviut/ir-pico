@@ -350,7 +350,8 @@ fn main() -> ! {
                             &mut timer,
                         );
                         info!("Finished transmit mode");
-                        device_state = DeviceState::Idle;
+                        // The host expects sample mode to resume automatically after TX,
+                        // so leave device_state alone.
                     }
                 }
 
@@ -431,28 +432,22 @@ fn run_transmit_mode(
 ) {
     led_pin.set_high().unwrap();
 
-    let mut bytes_transmitted: u32 = 0;
-
     // The original device only supports max 63 bytes per handshake
-    const BYTES_PER_HANDSHAKE: u8 = 62;
+    const BYTES_PER_HANDSHAKE: u32 = 62;
+
+    let mut bytes_transmitted: u32 = 0;
+    let mut handshakes_sent: u32 = 1;
 
     info!("Sending initial handshake");
-    serial_write_buffer(serial, &[BYTES_PER_HANDSHAKE]).unwrap();
+    serial_write_buffer(serial, &[BYTES_PER_HANDSHAKE as u8]).unwrap();
     let _ = serial.flush();
 
-    let mut bytes_expected = BYTES_PER_HANDSHAKE as usize;
     let mut last_sent = timer.get_counter();
+    let mut earliest_completion = timer.get_counter();
     let mut is_pulse = true;
 
     'outer: loop {
-        let bytes_read = poll_usb(serial, usb_dev, usb_rx_buf);
-        if bytes_read > bytes_expected {
-            panic!(
-                "Got more bytes ({}) than expected ({})",
-                bytes_read, bytes_expected
-            );
-        }
-        bytes_expected -= bytes_read;
+        poll_usb(serial, usb_dev, usb_rx_buf);
 
         if (timer.get_counter() - last_sent).to_millis() > 100 {
             warn!("Timeout waiting for transmit data");
@@ -468,10 +463,11 @@ fn run_transmit_mode(
                 if !is_pulse {
                     // We already pushed an "on"; push a 1µs dummy "off" to keep PIO state consistent
                     pio_tx_write(ir_tx, serial, usb_dev, usb_rx_buf, 0);
-                }
-                // Wait for PIO FIFO to drain
-                while !ir_tx.is_empty() {
-                    poll_usb(serial, usb_dev, usb_rx_buf);
+                    let now = timer.get_counter();
+                    if earliest_completion < now {
+                        earliest_completion = now;
+                    }
+                    earliest_completion += MicrosDurationU64::micros(1);
                 }
                 break 'outer;
             }
@@ -479,21 +475,37 @@ fn run_transmit_mode(
             let duration_us = irtoy_count_to_us(value);
             last_sent = timer.get_counter();
 
-            if is_pulse {
+            let actual_duration_us = if is_pulse {
                 let on_cycles = duration_us / PIO_CARRIER_CYCLE_US;
                 pio_tx_write(ir_tx, serial, usb_dev, usb_rx_buf, on_cycles);
+                on_cycles * PIO_CARRIER_CYCLE_US
             } else {
                 let off_x = duration_us.saturating_sub(1);
                 pio_tx_write(ir_tx, serial, usb_dev, usb_rx_buf, off_x);
+                duration_us
+            };
+
+            let now = timer.get_counter();
+            if earliest_completion < now {
+                earliest_completion = now;
             }
+            earliest_completion += MicrosDurationU64::micros(actual_duration_us as u64);
+
             is_pulse = !is_pulse;
         }
 
-        if bytes_expected == 0 {
+        while bytes_transmitted >= handshakes_sent * BYTES_PER_HANDSHAKE {
             info!("Sending new handshake");
-            bytes_expected = BYTES_PER_HANDSHAKE as usize;
-            serial_write_buffer(serial, &[BYTES_PER_HANDSHAKE]).unwrap();
+            handshakes_sent += 1;
+            serial_write_buffer(serial, &[BYTES_PER_HANDSHAKE as u8]).unwrap();
         }
+    }
+
+    // PIO FIFO empty does not imply the SM has finished the last symbol;
+    // a long trailing space can still be running. Reporting completion early
+    // lets the host overlap the next transmission with this one.
+    while timer.get_counter() < earliest_completion {
+        poll_usb(serial, usb_dev, usb_rx_buf);
     }
 
     // number of bytes transmitted: t|high|low
@@ -508,5 +520,5 @@ fn run_transmit_mode(
     .unwrap();
     serial_write_buffer(serial, b"C").unwrap();
 
-    led_pin.set_low().unwrap();
+    // LED stays on: the device returns to sample mode, where the LED is on.
 }
